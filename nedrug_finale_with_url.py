@@ -13,6 +13,7 @@ from selenium.common.exceptions import TimeoutException
 from PyPDF2 import PdfReader, errors
 from datetime import datetime
 import xlsxwriter # xlsxwriter 추가
+from urllib.parse import quote # URL 인코딩을 위해 추가
 
 # --- 설정 ---
 BASE_URL = "https://nedrug.mfds.go.kr/CCBAR01F012/getList"
@@ -27,7 +28,7 @@ RESULT_FOLDER_NAME = now.strftime("nedrug_%Y%m%d_%H%M")
 # 최종 결과물 (엑셀)이 저장될 디렉토리
 EXCEL_SAVE_DIR = os.path.join(SCRIPT_RUN_DIR, RESULT_FOLDER_NAME)
 
-# PDF 파일이 저장될 디렉토리 (이제 PDF만 다운로드하므로 이름 변경 불필요)
+# PDF 파일이 저장될 디렉토리
 DOWNLOAD_DIR = os.path.join(EXCEL_SAVE_DIR, "nedrug_pdfs")
 
 # 필요한 디렉토리 생성
@@ -359,9 +360,36 @@ def extract_reflect_date_from_pdf(full_text):
             return formatted_date
     return ""
 
+# 안전한 파일명 생성 함수 추가 (기존 코드 상단에 추가)
+
+def create_safe_filename(original_filename):
+    """
+    원본 파일명을 안전한 파일명으로 변환
+    특수문자, 공백, 괄호 등을 모두 언더스코어로 변경
+    """
+    # 파일명과 확장자 분리
+    name, ext = os.path.splitext(original_filename)
+    
+    # 특수문자를 모두 언더스코어로 변경
+    # 한글, 영문, 숫자만 남기고 나머지는 언더스코어로 변경
+    import re
+    safe_name = re.sub(r'[^\w가-힣]', '_', name)
+    
+    # 연속된 언더스코어를 하나로 변경
+    safe_name = re.sub(r'_+', '_', safe_name)
+    
+    # 앞뒤 언더스코어 제거
+    safe_name = safe_name.strip('_')
+    
+    # 파일명이 너무 길면 자르기 (Windows 파일명 길이 제한 고려)
+    if len(safe_name) > 100:
+        safe_name = safe_name[:100]
+    
+    return f"{safe_name}{ext}"
+
 def process_single_item(driver, row, idx, downloaded_files, records):
     """개별 항목을 처리하는 함수"""
-    current_item_processed_pdf_path = "" # 현재 항목에서 추출에 성공한 PDF의 경로 (하나만 필요)
+    current_item_processed_pdf_path = ""
     
     try:
         cells = row.find_elements(By.TAG_NAME, "td")
@@ -380,7 +408,6 @@ def process_single_item(driver, row, idx, downloaded_files, records):
             print(f"    ⏭️  스킵 (상태: {status})")
             return
 
-        # 관련 URL 저장
         record_url = href
 
         driver.execute_script("window.open(arguments[0]);", href)
@@ -400,12 +427,11 @@ def process_single_item(driver, row, idx, downloaded_files, records):
                 reflect_date_from_html = extract_reflect_date_from_html(driver)
            
             need_pdf_processing = False
-            # HTML에서 정보를 충분히 얻지 못했거나 시행날짜 추출이 필요한 경우 PDF 처리 시도
             if not ingredient_name or \
                (status == "변경명령(안) 의견조회" and not submit_deadline_from_html) or \
                (status == "사전예고" and not plan_date_from_html) or \
                (status == "변경명령" and not reflect_date_from_html) or \
-               status in ["변경명령(안) 의견조회", "변경명령"]: # 시행날짜는 PDF에서만 추출
+               status in ["변경명령(안) 의견조회", "변경명령"]:
                 need_pdf_processing = True
            
             if not need_pdf_processing:
@@ -436,7 +462,7 @@ def process_single_item(driver, row, idx, downloaded_files, records):
                                 file_id = file_id_match.group(1)
                                 filename = btn.get_attribute("title")
                                 if not filename:
-                                    filename = f"file_{file_id}.pdf" # 확장자가 없으면 일단 PDF로 가정
+                                    filename = f"file_{file_id}.pdf"
                             else:
                                 continue
                         else:
@@ -446,25 +472,27 @@ def process_single_item(driver, row, idx, downloaded_files, records):
                         filename = filename.strip()
                         file_extension = os.path.splitext(filename)[1].lower()
 
-                        # --- 최적화 1: PDF 파일만 다운로드 ---
                         if file_extension != '.pdf':
                             print(f"    ⏭️  PDF 파일 아님 ({file_extension}), 다운로드 스킵: {filename}")
                             continue
 
-                        if filename in downloaded_files:
-                            print(f"    ⏭️  이미 다운로드됨: {filename}")
+                        # ★★★ 핵심 수정: 안전한 파일명 생성 ★★★
+                        original_filename = filename
+                        safe_filename = create_safe_filename(original_filename)
+                        
+                        print(f"    📝 파일명 변환: {original_filename} → {safe_filename}")
+
+                        if original_filename in downloaded_files:
+                            print(f"    ⏭️  이미 다운로드됨: {original_filename}")
                             continue
 
                         download_url = f"https://nedrug.mfds.go.kr/cmn/edms/down/{file_id}"
-                        safe_filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
-                        # 공백을 밑줄로 대체
-                        safe_filename = safe_filename.replace(" ", "_")
                         local_file_path = os.path.join(DOWNLOAD_DIR, safe_filename)
 
                         file_content = None
                         for attempt in range(MAX_RETRIES):
                             try:
-                                print(f"    ⏳ {filename} 다운로드 시도 {attempt + 1}/{MAX_RETRIES}...")
+                                print(f"    ⏳ {safe_filename} 다운로드 시도 {attempt + 1}/{MAX_RETRIES}...")
                                 response = requests.get(download_url, headers=HEADERS, timeout=30)
                                 response.raise_for_status()
                                 file_content = response.content
@@ -478,19 +506,19 @@ def process_single_item(driver, row, idx, downloaded_files, records):
                                 time.sleep(RETRY_DELAY)
                         
                         if file_content is None:
-                            print(f"   ❌ {filename} 모든 재시도 실패. 다운로드 건너뜜.")
+                            print(f"   ❌ {safe_filename} 모든 재시도 실패. 다운로드 건너뜀.")
                             continue
 
                         try:
                             with open(local_file_path, "wb") as f:
                                 f.write(file_content)
                             print(f"   💾 파일 저장 완료: {safe_filename}")
-                            downloaded_files.add(filename) # 성공적으로 다운로드된 파일만 set에 추가
-                            current_item_processed_pdf_path = local_file_path # 이 항목에서 처리할 PDF 경로 저장 (첫 번째 성공한 PDF)
-                            break # 첫 번째 PDF만 다운로드 성공하면 다음 PDF는 스킵 (최적화)
+                            downloaded_files.add(original_filename)  # 원본 파일명으로 중복 체크
+                            current_item_processed_pdf_path = local_file_path
+                            break
                             
                         except Exception as save_err:
-                            print(f"   ❌ {filename} 저장 중 오류 발생: {save_err}")
+                            print(f"   ❌ {safe_filename} 저장 중 오류 발생: {save_err}")
                             continue
 
                     except Exception as btn_proc_error:
@@ -568,8 +596,8 @@ def process_single_item(driver, row, idx, downloaded_files, records):
                     "E_예정일": "",
                     "F_반영일자": "",
                     "G_원료성분명": ingredient_name,
-                    "H_관련 URL": record_url, # 추가된 컬럼
-                    "I_관련 PDF": record_pdf_path # 추가된 컬럼
+                    "H_관련 URL": record_url,
+                    "I_관련 PDF": record_pdf_path
                 }
 
             elif status == "사전예고":
@@ -581,8 +609,8 @@ def process_single_item(driver, row, idx, downloaded_files, records):
                     "E_예정일": plan_date_from_html if plan_date_from_html else final_plan_date,
                     "F_반영일자": "",
                     "G_원료성분명": ingredient_name,
-                    "H_관련 URL": record_url, # 추가된 컬럼
-                    "I_관련 PDF": record_pdf_path # 추가된 컬럼
+                    "H_관련 URL": record_url,
+                    "I_관련 PDF": record_pdf_path
                 }
 
             elif status == "변경명령":
@@ -594,8 +622,8 @@ def process_single_item(driver, row, idx, downloaded_files, records):
                     "E_예정일": "",
                     "F_반영일자": reflect_date_from_html if reflect_date_from_html else final_reflect_date,
                     "G_원료성분명": ingredient_name,
-                    "H_관련 URL": record_url, # 추가된 컬럼
-                    "I_관련 PDF": record_pdf_path # 추가된 컬럼
+                    "H_관련 URL": record_url,
+                    "I_관련 PDF": record_pdf_path
                 }
 
             records.append(record)
@@ -603,7 +631,7 @@ def process_single_item(driver, row, idx, downloaded_files, records):
 
             if not any([record.get("C_시행날짜"), record.get("D_제출날짜"), record.get("E_예정일"), record.get("F_반영일자"), record.get("G_원료성분명")]):
                 print(f"    ⚠️  경고: 이 항목 [{title}]에서 필요한 모든 정보 추출 실패!")
-                if current_item_processed_pdf_path: # 다운로드된 PDF 파일이 있다면
+                if current_item_processed_pdf_path:
                     print(f"    🔍 처리된 PDF 파일: {current_item_processed_pdf_path}")
                 else:
                     print(f"    🔍 이 항목에 PDF 첨부파일이 없거나 다운로드에 실패했습니다.")
@@ -627,8 +655,8 @@ def process_single_item(driver, row, idx, downloaded_files, records):
 def main():
     driver = webdriver.Chrome(options=options)
     records = []
-    downloaded_files = set() # 전체 세션에서 다운로드된 파일명 추적
-    max_items = 50 # 기본값으로 다시 설정 (필요하면 10으로 변경하여 디버깅)
+    downloaded_files = set()
+    max_items = 10 
 
     try:
         print(f"🚀 크롤링 시작... (최근 {max_items}건만 처리)")
@@ -679,83 +707,127 @@ def main():
     print(f"실제 수집된 레코드: {len(records)}개")
     print(f"다운로드된 파일: {len(downloaded_files)}개")
    
+    # Excel 파일 생성 부분 (main 함수의 마지막 부분을 수정)
+
     if records:
         df = pd.DataFrame(records).drop_duplicates()
-       
+    
         output_path = os.path.join(EXCEL_SAVE_DIR, f"변경명령_의견조회_요약_최근{len(df)}건.xlsx")
-       
-        # --- 변경 시작: xlsxwriter 엔진 및 하이퍼링크 포맷 사용 ---
+    
         with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
             workbook = writer.book
             hyperlink_format = workbook.add_format({'font_color': 'blue', 'underline': 1})
 
             # 의견조회 시트
-            opinion_df = df[df['B_단계'] == '의견조회']
+            opinion_df = df[df['B_단계'] == '의견조회'].copy()
             if not opinion_df.empty:
-                opinion_final = opinion_df[['A_제목', 'B_단계', 'C_시행날짜', 'D_제출날짜', 'G_원료성분명', 'H_관련 URL', 'I_관련 PDF']].copy()
-                opinion_final.columns = ['제목', '단계', '시행날짜', '제출날짜', '원료/성분명(영문)', '관련 URL', '관련 PDF']
+                opinion_final = opinion_df[['A_제목', 'B_단계', 'C_시행날짜', 'D_제출날짜', 'G_원료성분명', 'H_관련 URL', 'I_관련 PDF']]
+                opinion_final.columns = ['제목', '단계', '시행날짜', '제출날짜', '원료/성분명(영문)', '관련 URL', 'PDF파일']
                 opinion_final.to_excel(writer, sheet_name='의견조회', index=False)
                 worksheet = writer.sheets['의견조회']
                 
-                # '관련 URL' 컬럼에 하이퍼링크 적용
-                for row_num, url in enumerate(opinion_final['관련 URL'], start=1): # 헤더 제외하고 1부터 시작
-                    if url:
-                        worksheet.write_url(row_num, opinion_final.columns.get_loc('관련 URL'), url, hyperlink_format, url)
+                # 컬럼 너비 자동 조정
+                worksheet.set_column('A:A', 35)  # 제목
+                worksheet.set_column('B:B', 12)  # 단계
+                worksheet.set_column('C:C', 15)  # 시행날짜
+                worksheet.set_column('D:D', 15)  # 제출날짜
+                worksheet.set_column('E:E', 25)  # 원료/성분명
+                worksheet.set_column('F:F', 35)  # 관련 URL
+                worksheet.set_column('G:G', 45)  # PDF파일
                 
-                # '관련 PDF' 컬럼에 하이퍼링크 적용 (상대 경로로 변환)
-                for row_num, pdf_path in enumerate(opinion_final['관련 PDF'], start=1):
+                # '관련 URL' 컬럼에 하이퍼링크 적용
+                url_col_idx = opinion_final.columns.get_loc('관련 URL')
+                for row_num, url in enumerate(opinion_final['관련 URL'], start=1):
+                    if url:
+                        worksheet.write_url(row_num, url_col_idx, url, hyperlink_format, url)
+                
+                # 'PDF파일' 컬럼에 파일명만 표시 (하이퍼링크 없음)
+                pdf_col_idx = opinion_final.columns.get_loc('PDF파일')
+                for row_num, pdf_path in enumerate(opinion_final['PDF파일'], start=1):
                     if pdf_path and os.path.exists(pdf_path):
-                        relative_pdf_path = os.path.relpath(pdf_path, os.path.dirname(output_path))
-                        worksheet.write_url(row_num, opinion_final.columns.get_loc('관련 PDF'), relative_pdf_path, hyperlink_format, os.path.basename(pdf_path))
+                        pdf_filename = os.path.basename(pdf_path)
+                        worksheet.write_string(row_num, pdf_col_idx, pdf_filename)
+                    else:
+                        worksheet.write_string(row_num, pdf_col_idx, "")
             
             # 사전예고 시트
-            preview_df = df[df['B_단계'] == '사전예고']
+            preview_df = df[df['B_단계'] == '사전예고'].copy()
             if not preview_df.empty:
-                preview_final = preview_df[['A_제목', 'B_단계', 'E_예정일', 'G_원료성분명', 'H_관련 URL', 'I_관련 PDF']].copy()
-                preview_final.columns = ['제목', '단계', '예정일', '원료/성분명(영문)', '관련 URL', '관련 PDF']
+                preview_final = preview_df[['A_제목', 'B_단계', 'E_예정일', 'G_원료성분명', 'H_관련 URL', 'I_관련 PDF']]
+                preview_final.columns = ['제목', '단계', '예정일', '원료/성분명(영문)', '관련 URL', 'PDF파일']
                 preview_final.to_excel(writer, sheet_name='사전예고', index=False)
                 worksheet = writer.sheets['사전예고']
 
-                # '관련 URL' 컬럼에 하이퍼링크 적용
+                # 컬럼 너비 조정
+                worksheet.set_column('A:A', 35)  # 제목
+                worksheet.set_column('B:B', 12)  # 단계
+                worksheet.set_column('C:C', 15)  # 예정일
+                worksheet.set_column('D:D', 25)  # 원료/성분명
+                worksheet.set_column('E:E', 35)  # 관련 URL
+                worksheet.set_column('F:F', 45)  # PDF파일
+
+                url_col_idx = preview_final.columns.get_loc('관련 URL')
                 for row_num, url in enumerate(preview_final['관련 URL'], start=1):
                     if url:
-                        worksheet.write_url(row_num, preview_final.columns.get_loc('관련 URL'), url, hyperlink_format, url)
+                        worksheet.write_url(row_num, url_col_idx, url, hyperlink_format, url)
                 
-                # '관련 PDF' 컬럼에 하이퍼링크 적용 (상대 경로로 변환)
-                for row_num, pdf_path in enumerate(preview_final['관련 PDF'], start=1):
+                pdf_col_idx = preview_final.columns.get_loc('PDF파일')
+                for row_num, pdf_path in enumerate(preview_final['PDF파일'], start=1):
                     if pdf_path and os.path.exists(pdf_path):
-                        relative_pdf_path = os.path.relpath(pdf_path, os.path.dirname(output_path))
-                        worksheet.write_url(row_num, preview_final.columns.get_loc('관련 PDF'), relative_pdf_path, hyperlink_format, os.path.basename(pdf_path))
+                        pdf_filename = os.path.basename(pdf_path)
+                        worksheet.write_string(row_num, pdf_col_idx, pdf_filename)
+                    else:
+                        worksheet.write_string(row_num, pdf_col_idx, "")
 
             # 변경명령 시트
-            command_df = df[df['B_단계'] == '변경명령']
+            command_df = df[df['B_단계'] == '변경명령'].copy()
             if not command_df.empty:
-                command_final = command_df[['A_제목', 'B_단계', 'C_시행날짜', 'F_반영일자', 'G_원료성분명', 'H_관련 URL', 'I_관련 PDF']].copy()
-                command_final.columns = ['제목', '단계', '시행날짜', '반영일자', '원료/성분명(영문)', '관련 URL', '관련 PDF']
+                command_final = command_df[['A_제목', 'B_단계', 'C_시행날짜', 'F_반영일자', 'G_원료성분명', 'H_관련 URL', 'I_관련 PDF']]
+                command_final.columns = ['제목', '단계', '시행날짜', '반영일자', '원료/성분명(영문)', '관련 URL', 'PDF파일']
                 command_final.to_excel(writer, sheet_name='변경명령', index=False)
                 worksheet = writer.sheets['변경명령']
 
-                # '관련 URL' 컬럼에 하이퍼링크 적용
+                # 컬럼 너비 조정
+                worksheet.set_column('A:A', 35)  # 제목
+                worksheet.set_column('B:B', 12)  # 단계
+                worksheet.set_column('C:C', 15)  # 시행날짜
+                worksheet.set_column('D:D', 15)  # 반영일자
+                worksheet.set_column('E:E', 25)  # 원료/성분명
+                worksheet.set_column('F:F', 35)  # 관련 URL
+                worksheet.set_column('G:G', 45)  # PDF파일
+
+                url_col_idx = command_final.columns.get_loc('관련 URL')
                 for row_num, url in enumerate(command_final['관련 URL'], start=1):
                     if url:
-                        worksheet.write_url(row_num, command_final.columns.get_loc('관련 URL'), url, hyperlink_format, url)
+                        worksheet.write_url(row_num, url_col_idx, url, hyperlink_format, url)
                 
-                # '관련 PDF' 컬럼에 하이퍼링크 적용 (상대 경로로 변환)
-                for row_num, pdf_path in enumerate(command_final['관련 PDF'], start=1):
+                pdf_col_idx = command_final.columns.get_loc('PDF파일')
+                for row_num, pdf_path in enumerate(command_final['PDF파일'], start=1):
                     if pdf_path and os.path.exists(pdf_path):
-                        relative_pdf_path = os.path.relpath(pdf_path, os.path.dirname(output_path))
-                        worksheet.write_url(row_num, command_final.columns.get_loc('관련 PDF'), relative_pdf_path, hyperlink_format, os.path.basename(pdf_path))
-        # --- 변경 종료 ---
-       
+                        pdf_filename = os.path.basename(pdf_path)
+                        worksheet.write_string(row_num, pdf_col_idx, pdf_filename)
+                    else:
+                        worksheet.write_string(row_num, pdf_col_idx, "")
+    
         print(f"✅ 엑셀 파일 저장 완료!")
         print(f"📁 저장 경로: {output_path}")
         print(f"📋 최종 레코드 수: {len(df)}개")
-       
+        
+        # 사용자 가이드 출력
+        print(f"\n📖 사용 가이드:")
+        print(f"┌─────────────────────────────────────────────────┐")
+        print(f"│ 📊 Excel 파일: {os.path.basename(output_path):<30} │")
+        print(f"│ 📂 PDF 폴더:   nedrug_pdfs/                     │")
+        print(f"│ 💡 사용법:     Excel에서 PDF파일명 확인 후      │")
+        print(f"│               PDF 폴더에서 직접 열어주세요      │")
+        print(f"│ 🔗 웹링크:     '관련 URL' 컬럼 클릭으로 이동    │")
+        print(f"└─────────────────────────────────────────────────┘")
+    
         status_counts = df['B_단계'].value_counts()
         print(f"\n📈 상태별 통계:")
         for status_item, count_item in status_counts.items():
             print(f"  - {status_item}: {count_item}개")
-       
+    
         print(f"\n📂 저장된 파일들:")
         print(f"  📊 엑셀 파일: {output_path}")
         print(f"     - 의견조회 시트: {len(opinion_df) if 'opinion_df' in locals() else 0}건")
@@ -763,8 +835,22 @@ def main():
         print(f"     - 변경명령 시트: {len(command_df) if 'command_df' in locals() else 0}건")
         print(f"  📄 다운로드된 PDF 파일들: {DOWNLOAD_DIR}")
         print(f"     (총 {len(downloaded_files)}개 PDF 파일이 다운로드되었습니다.)")
+        
+        # 폴더 구조 안내
+        print(f"\n📁 폴더 구조:")
+        print(f"  {RESULT_FOLDER_NAME}/")
+        print(f"  ├── {os.path.basename(output_path)}")
+        print(f"  └── nedrug_pdfs/")
+        for i, filename in enumerate(sorted(downloaded_files), 1):
+            if i <= 3:  # 처음 3개만 표시
+                safe_name = create_safe_filename(filename)
+                print(f"      ├── {safe_name}")
+            elif i == 4 and len(downloaded_files) > 3:
+                print(f"      └── ... (총 {len(downloaded_files)}개 파일)")
+                break
+                
     else:
         print("❌ 수집된 데이터가 없습니다.")
-
+   
 if __name__ == "__main__":
     main()
